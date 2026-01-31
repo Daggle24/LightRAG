@@ -458,6 +458,16 @@ def parse_args() -> argparse.Namespace:
 
     ollama_server_infos.LIGHTRAG_NAME = args.simulated_model_name
     ollama_server_infos.LIGHTRAG_TAG = args.simulated_model_tag
+    
+     # RAGAnything multimodal configuration
+    args.enable_raganything = get_env_value("ENABLE_RAGANYTHING", False, bool)
+    args.vision_model = get_env_value("VISION_MODEL", None, special_none=True)
+    args.vision_binding_host = get_env_value("VISION_BINDING_HOST", None, special_none=True)
+    args.vision_binding_api_key = get_env_value("VISION_BINDING_API_KEY", None, special_none=True)
+    args.mineru_parse_method = get_env_value("MINERU_PARSE_METHOD", "auto")
+    args.enable_image_processing = get_env_value("ENABLE_IMAGE_PROCESSING", True, bool)
+    args.enable_table_processing = get_env_value("ENABLE_TABLE_PROCESSING", True, bool)
+    args.enable_equation_processing = get_env_value("ENABLE_EQUATION_PROCESSING", True, bool)
 
     return args
 

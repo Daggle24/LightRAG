@@ -33,6 +33,8 @@ from lightrag.api.routers.document_routes import DocumentManager, create_documen
 from lightrag.api.routers.graph_routes import create_graph_routes
 from lightrag.api.routers.ollama_api import OllamaAPI
 from lightrag.api.routers.query_routes import create_query_routes
+from lightrag.api.routers.multimodal_routes import create_multimodal_routes
+from lightrag.api.token_tracking import TokenTrackingLightRAG
 from lightrag.api.utils_api import (
     check_env_file,
     display_splash_screen,
@@ -355,7 +357,7 @@ def create_app(args):
 
     rag_cache = {}
 
-    async def create_rag(request: Request | None) -> LightRAG:
+    async def create_rag(request: Request | None) -> TokenTrackingLightRAG:
         """Create or retrieve LightRAG instance for the current workspace"""
         workspace = args.workspace
         if request is not None:
@@ -410,10 +412,117 @@ def create_app(args):
             # Data migration regardless of storage implementation
             await rag.check_and_migrate_data()
 
-            rag_cache[workspace] = rag
-            return rag
+            # Wrap with token tracking
+            tracked_rag = TokenTrackingLightRAG(rag)
+            rag_cache[workspace] = tracked_rag
         except Exception as e:
             logger.error(f"Failed to initialize LightRAG: {e}")
+            raise
+    # RAGAnything cache for multimodal processing
+    raganything_cache = {}
+
+    def create_vision_model_func():
+        """Create vision model function for RAGAnything multimodal processing"""
+        from lightrag.llm.openai import openai_complete_if_cache
+
+        # Use vision-specific config if available, otherwise fall back to main LLM config
+        vision_model = args.vision_model or args.llm_model
+        vision_host = args.vision_binding_host or args.llm_binding_host
+        vision_api_key = args.vision_binding_api_key or args.llm_binding_api_key
+
+        def vision_model_func(
+            prompt, system_prompt=None, history_messages=[], image_data=None, messages=None, **kwargs
+        ):
+            # If messages format is provided (for multimodal VLM enhanced query), use it directly
+            if messages:
+                return openai_complete_if_cache(
+                    vision_model,
+                    "",
+                    system_prompt=None,
+                    history_messages=[],
+                    messages=messages,
+                    api_key=vision_api_key,
+                    base_url=vision_host,
+                    **kwargs,
+                )
+            # Traditional single image format
+            elif image_data:
+                return openai_complete_if_cache(
+                    vision_model,
+                    "",
+                    system_prompt=None,
+                    history_messages=[],
+                    messages=[
+                        {"role": "system", "content": system_prompt}
+                        if system_prompt
+                        else None,
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{image_data}"
+                                    },
+                                },
+                            ],
+                        }
+                        if image_data
+                        else {"role": "user", "content": prompt},
+                    ],
+                    api_key=vision_api_key,
+                    base_url=vision_host,
+                    **kwargs,
+                )
+            # Pure text format - use main LLM
+            else:
+                return create_llm_model_func(args.llm_binding)(
+                    prompt, system_prompt, history_messages, **kwargs
+                )
+
+        return vision_model_func
+
+    async def create_raganything(request: Request | None):
+        """Create or retrieve RAGAnything instance wrapping existing LightRAG"""
+        if not args.enable_raganything:
+            raise HTTPException(
+                status_code=400,
+                detail="RAGAnything is not enabled. Set ENABLE_RAGANYTHING=true"
+            )
+
+        workspace = args.workspace
+        if request is not None:
+            workspace = get_workspace_from_request(request, args.workspace)
+
+        logger.debug(f"Using RAGAnything instance for workspace: '{workspace}'")
+        if workspace in raganything_cache:
+            return raganything_cache[workspace]
+
+        try:
+            from raganything import RAGAnything
+
+            # Get the existing LightRAG instance
+            lightrag_instance = await create_rag(request)
+
+            # Create RAGAnything wrapper
+            rag_anything = RAGAnything(
+                lightrag=lightrag_instance,
+                vision_model_func=create_vision_model_func(),
+            )
+
+            raganything_cache[workspace] = rag_anything
+            logger.info(f"Created RAGAnything instance for workspace: '{workspace}'")
+            return rag_anything
+
+        except ImportError as e:
+            logger.error(f"Failed to import RAGAnything: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail="RAGAnything is not installed. Install with: pip install raganything"
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize RAGAnything: {e}")
             raise
 
     @asynccontextmanager
@@ -1118,6 +1227,20 @@ def create_app(args):
     )
     app.include_router(create_query_routes(create_rag, api_key, args.top_k))
     app.include_router(create_graph_routes(create_rag, api_key))
+
+     # Add multimodal routes (RAGAnything integration)
+    if args.enable_raganything:
+        app.include_router(
+            create_multimodal_routes(
+                create_raganything,
+                create_rag,
+                api_key,
+                args,
+            )
+        )
+        logger.info("RAGAnything multimodal routes enabled")
+    else:
+        logger.info("RAGAnything multimodal routes disabled (set ENABLE_RAGANYTHING=true to enable)")
 
     # Add Ollama API routes
     ollama_api = OllamaAPI(create_rag, top_k=args.top_k, api_key=api_key)

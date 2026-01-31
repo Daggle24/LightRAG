@@ -2575,7 +2575,16 @@ class TokenTracker:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.total_tokens = 0
+        self.cached_tokens = 0
         self.call_count = 0
+
+        # Detailed token breakdowns from OpenAI API
+        self.input_cached_tokens = 0
+        self.input_audio_tokens = 0
+        self.output_reasoning_tokens = 0
+        self.output_audio_tokens = 0
+        self.output_accepted_prediction_tokens = 0
+        self.output_rejected_prediction_tokens = 0
 
     def add_usage(self, token_counts):
         """Add token usage from one LLM call.

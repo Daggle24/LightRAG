@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from lightrag.api.utils_api import get_combined_auth_dependency
 from lightrag.base import QueryParam
-from lightrag.utils import logger
+from lightrag.utils import logger, TokenTracker
 
 router = APIRouter(tags=["query"])
 
@@ -84,7 +84,7 @@ class QueryRequest(BaseModel):
 
     conversation_history: Optional[List[Dict[str, Any]]] = Field(
         default=None,
-        description="History messages are only sent to LLM for context, not used for retrieval. Format: [{'role': 'user/assistant', 'content': 'message'}].",
+        description="Stores past conversation history to maintain context. Format: [{'role': 'user/assistant', 'content': 'message'}].",
     )
 
     user_prompt: Optional[str] = Field(
@@ -164,6 +164,10 @@ class QueryResponse(BaseModel):
         default=None,
         description="Reference list (Disabled when include_references=False, /query/data always includes references.)",
     )
+    metrics: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Token usage metrics for the query operation"
+    )
 
 
 class QueryDataResponse(BaseModel):
@@ -174,6 +178,10 @@ class QueryDataResponse(BaseModel):
     )
     metadata: Dict[str, Any] = Field(
         description="Query metadata including mode, keywords, and processing information"
+    )
+    metrics: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Token usage metrics for the query operation"
     )
 
 
@@ -406,6 +414,10 @@ def create_query_routes(create_rag, api_key: Optional[str] = None, top_k: int = 
         try:
             rag = await create_rag(raw_request)
 
+            # Initialize token tracker for this query operation
+            token_tracker = TokenTracker()
+            rag.set_token_tracker(token_tracker)
+
             param = request.to_query_params(
                 False
             )  # Ensure stream=False for non-streaming endpoint
@@ -414,6 +426,23 @@ def create_query_routes(create_rag, api_key: Optional[str] = None, top_k: int = 
 
             # Unified approach: always use aquery_llm for both cases
             result = await rag.aquery_llm(request.query, param=param)
+
+            # Get token usage metrics and add model information
+            metrics = token_tracker.get_usage()
+
+            mapped_metrics = {
+                "input": metrics.get("prompt_tokens", 0) - metrics.get("cached_tokens", 0),
+                "input_cached_tokens": metrics.get("cached_tokens", 0),
+                "call_count": metrics.get("call_count", 0),
+                "model": rag._lightrag.llm_model_name,
+                "output": metrics.get("completion_tokens", 0) - metrics.get("output_reasoning_tokens", 0),
+                "output_reasoning_tokens": metrics.get("output_reasoning_tokens", 0),
+                "output_accepted_prediction_tokens": metrics.get("output_accepted_prediction_tokens", 0),
+                "output_rejected_prediction_tokens": metrics.get("output_rejected_prediction_tokens", 0),
+                "total_usage": metrics.get("total_tokens", 0),
+            }
+
+            metrics = mapped_metrics
 
             # Extract LLM response and references from unified result
             llm_response = result.get("llm_response", {})
@@ -450,9 +479,9 @@ def create_query_routes(create_rag, api_key: Optional[str] = None, top_k: int = 
 
             # Return response with or without references based on request
             if request.include_references:
-                return QueryResponse(response=response_content, references=references)
+                return QueryResponse(response=response_content, references=references, metrics=metrics)
             else:
-                return QueryResponse(response=response_content, references=None)
+                return QueryResponse(response=response_content, references=None, metrics=metrics)
         except Exception as e:
             logger.error(f"Error processing query: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
@@ -666,6 +695,10 @@ def create_query_routes(create_rag, api_key: Optional[str] = None, top_k: int = 
         try:
             rag = await create_rag(raw_request)
 
+            # Initialize token tracker for this query operation
+            token_tracker = TokenTracker()
+            rag.set_token_tracker(token_tracker)
+
             # Use the stream parameter from the request, defaulting to True if not specified
             stream_mode = request.stream if request.stream is not None else True
             param = request.to_query_params(stream_mode)
@@ -674,6 +707,13 @@ def create_query_routes(create_rag, api_key: Optional[str] = None, top_k: int = 
 
             # Unified approach: always use aquery_llm for all cases
             result = await rag.aquery_llm(request.query, param=param)
+
+            # Log token usage for streaming queries (can't include in streamed response)
+            final_usage = token_tracker.get_usage()
+            final_usage["model"] = rag._lightrag.llm_model_name
+            logger.info(f"Token usage for streaming query '{request.query[:50]}...': {final_usage}")
+            # Here you could send the metrics to your backend server
+            # await send_metrics_to_backend("streaming_query", final_usage)
 
             async def stream_generator():
                 # Extract references and LLM response from unified result
@@ -1147,12 +1187,20 @@ def create_query_routes(create_rag, api_key: Optional[str] = None, top_k: int = 
         try:
             rag = await create_rag(raw_request)
 
+            # Initialize token tracker for this query operation
+            token_tracker = TokenTracker()
+            rag.set_token_tracker(token_tracker)
+
             param = request.to_query_params(False)  # No streaming for data endpoint
             response = await rag.aquery_data(request.query, param=param)
 
+            # Get token usage metrics and add model information
+            metrics = token_tracker.get_usage()
+            metrics["model"] = rag._lightrag.llm_model_name
+
             # aquery_data returns the new format with status, message, data, and metadata
             if isinstance(response, dict):
-                return QueryDataResponse(**response)
+                return QueryDataResponse(**response, metrics=metrics)
             else:
                 # Handle unexpected response format
                 return QueryDataResponse(
@@ -1160,6 +1208,7 @@ def create_query_routes(create_rag, api_key: Optional[str] = None, top_k: int = 
                     message="Invalid response type",
                     data={},
                     metadata={},
+                    metrics=metrics,
                 )
         except Exception as e:
             logger.error(f"Error processing data query: {str(e)}", exc_info=True)

@@ -58,25 +58,27 @@ You are a Knowledge Graph Specialist responsible for extracting entities and rel
 
 ---Examples---
 {examples}
+
+---Real Data to be Processed---
+<Input>
+Entity_types: [{entity_types}]
 """
 
 PROMPTS["entity_extraction_user_prompt"] = """---Task---
-Extract entities and relationships from the input text in Data to be Processed below.
+Extract entities and relationships from the following input text.
+
+
+---Input Text---
+Text:
+```
+{input_text}
+```
 
 ---Instructions---
 1.  **Strict Adherence to Format:** Strictly adhere to all format requirements for entity and relationship lists, including output order, field delimiters, and proper noun handling, as specified in the system prompt.
 2.  **Output Content Only:** Output *only* the extracted list of entities and relationships. Do not include any introductory or concluding remarks, explanations, or additional text before or after the list.
 3.  **Completion Signal:** Output `{completion_delimiter}` as the final line after all relevant entities and relationships have been extracted and presented.
 4.  **Output Language:** Ensure the output language is {language}. Proper nouns (e.g., personal names, place names, organization names) must be kept in their original language and not translated.
-
----Data to be Processed---
-<Entity_types>
-[{entity_types}]
-
-<Input Text>
-```
-{input_text}
-```
 
 <Output>
 """
@@ -100,10 +102,7 @@ Based on the last extraction task, identify and extract any **missed or incorrec
 """
 
 PROMPTS["entity_extraction_examples"] = [
-    """<Entity_types>
-["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject"]
-
-<Input Text>
+    """<Input Text>
 ```
 while Alex clenched his jaw, the buzz of frustration dull against the backdrop of Taylor's authoritarian certainty. It was this competitive undercurrent that kept him alert, the sense that his and Jordan's shared commitment to discovery was an unspoken rebellion against Cruz's narrowing vision of control and order.
 
@@ -128,10 +127,7 @@ relation{tuple_delimiter}Taylor{tuple_delimiter}The Device{tuple_delimiter}rever
 {completion_delimiter}
 
 """,
-    """<Entity_types>
-["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject"]
-
-<Input Text>
+    """<Input Text>
 ```
 Stock markets faced a sharp downturn today as tech giants saw significant declines, with the global tech index dropping by 3.4% in midday trading. Analysts attribute the selloff to investor concerns over rising interest rates and regulatory uncertainty.
 
@@ -158,10 +154,7 @@ relation{tuple_delimiter}Federal Reserve Policy Announcement{tuple_delimiter}Mar
 {completion_delimiter}
 
 """,
-    """<Entity_types>
-["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject"]
-
-<Input Text>
+    """<Input Text>
 ```
 At the World Athletics Championship in Tokyo, Noah Carter broke the 100m sprint record using cutting-edge carbon-fiber spikes.
 ```
@@ -221,6 +214,7 @@ PROMPTS["fail_response"] = (
     "Sorry, I'm not able to provide an answer to that question.[no-context]"
 )
 
+# Static system prompt (cacheable part) - includes few-shot examples for 1024+ tokens
 PROMPTS["rag_response"] = """---Role---
 
 You are an expert AI assistant specializing in synthesizing information from a provided knowledge base. Your primary function is to answer user queries accurately by ONLY using the information within the provided **Context**.
@@ -266,14 +260,87 @@ Consider the conversation history if provided to maintain conversational flow an
 - [2] Document Title Two
 - [3] Document Title Three
 ```
+--- Ejemplos de respuestas ideales (sígueme estrictamente este estilo) ---
 
-6. Additional Instructions: {user_prompt}
+Ejemplo 1 - Pregunta sencilla
+User query: ¿Qué dice el documento sobre el tratamiento del asma?
+Context: [contiene varios chunks con reference_id 7,12,15]
 
+Respuesta esperada:
+El tratamiento del asma se basa principalmente en dos enfoques: el control a largo plazo y el alivio rápido de los síntomas.
 
----Context---
+**Control a largo plazo**
+- Uso diario de corticosteroides inhalados (principalmente budesonida o fluticasona)
+- Modificadores de leucotrienos en casos leves-moderados
+
+**Alivio rápido**
+- Agonistas beta-2 de acción corta (salbutamol) según necesidad
+
+No se recomienda el uso prolongado de corticosteroides orales salvo en crisis graves [7][12].
+
+### References
+- [7] Guía GINA 2023 - Tratamiento farmacológico
+- [12] Protocolo hospitalario asma 2022
+
+Ejemplo 2 - Pregunta que requiere síntesis
+User query: Compara las recomendaciones de seguridad para baterías de litio entre los documentos.
+Context: [varios documentos contradictorios leves]
+
+Respuesta esperada:
+Las principales recomendaciones de seguridad para baterías de litio son bastante consistentes entre documentos, con pequeñas diferencias en énfasis:
+
+**Puntos en común**
+- Nunca perforar ni aplastar la batería
+- Evitar exposición a temperaturas >60°C
+- Utilizar cargador con protección contra sobrecarga
+- Almacenar entre 15–25°C idealmente
+
+**Diferencias notables**
+- Documento A recomienda no cargar por encima del 80% para uso prolongado [3]
+- Documento B solo menciona límite del 100% pero enfatiza ventilación durante carga [8][11]
+
+En general, seguir las prácticas más restrictivas es la opción más segura.
+
+### References
+- [3] Manual fabricante baterías Li-ion 2024
+- [8] Normativa transporte mercancías peligrosas ADR
+- [11] Guía seguridad industrial baterías
+
+Ejemplo 3 - Caso sin información suficiente
+User query: ¿Cuál es el color favorito del CEO según los reportes internos?
+Context: [ningún chunk menciona color favorito]
+
+Respuesta esperada:
+No tengo suficiente información en el contexto proporcionado para responder a esta pregunta. Ninguno de los documentos disponibles menciona el color favorito del CEO.
+
+[No se incluye sección References porque no se usó ninguna fuente]
+
+Ejemplo 4 - Pregunta en inglés (para mostrar manejo de idioma)
+User query: What is the main conclusion of the 2024 sustainability report?
+Respuesta esperada:
+The main conclusion of the 2024 sustainability report is that the company achieved a **42% reduction** in Scope 1 and 2 emissions compared to the 2019 baseline, putting it on track to meet its 2030 target of 65% reduction.
+
+Key contributing factors include:
+- Transition to renewable energy sources (78% of electricity now renewable)
+- Implementation of energy-efficient equipment across manufacturing sites
+
+### References
+- [19] Sustainability Report 2024 - Executive Summary
+
+--- FIN DE EJEMPLOS ---
+IMPORTANTE: Imita el tono, estructura, nivel de detalle y formalidad de estos ejemplos en todas tus respuestas
+"""
+
+# Dynamic context template (goes in user message)
+PROMPTS["rag_response_context"] = """---Context---
 
 {context_data}
+
+---Additional Instructions---
+
+{user_prompt}
 """
+
 
 PROMPTS["naive_rag_response"] = """---Role---
 
@@ -321,7 +388,7 @@ Consider the conversation history if provided to maintain conversational flow an
 - [3] Document Title Three
 ```
 
-6. Additional Instructions: {user_prompt}
+6. Additional Instructions: Follow these guidelines strictly
 
 
 ---Context---
@@ -384,7 +451,6 @@ Given a user query, your task is to extract two distinct types of keywords:
 2. **Source of Truth**: All keywords must be explicitly derived from the user query, with both high-level and low-level keyword categories are required to contain content.
 3. **Concise & Meaningful**: Keywords should be concise words or meaningful phrases. Prioritize multi-word phrases when they represent a single concept. For example, from "latest financial report of Apple Inc.", you should extract "latest financial report" and "Apple Inc." rather than "latest", "financial", "report", and "Apple".
 4. **Handle Edge Cases**: For queries that are too simple, vague, or nonsensical (e.g., "hello", "ok", "asdfghjkl"), you must return a JSON object with empty lists for both keyword types.
-5. **Language**: All extracted keywords MUST be in {language}. Proper nouns (e.g., personal names, place names, organization names) should be kept in their original language.
 
 ---Examples---
 {examples}

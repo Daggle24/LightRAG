@@ -5,7 +5,6 @@ import logging
 from collections.abc import AsyncIterator
 
 import pipmaster as pm
-import tiktoken
 
 # install specific modules
 if not pm.is_installed("openai"):
@@ -73,30 +72,6 @@ class InvalidResponseError(Exception):
     """Custom exception class for triggering retry mechanism"""
 
     pass
-
-
-# Module-level cache for tiktoken encodings
-_TIKTOKEN_ENCODING_CACHE: dict[str, Any] = {}
-
-
-def _get_tiktoken_encoding_for_model(model: str) -> Any:
-    """Get tiktoken encoding for the specified model with caching.
-
-    Args:
-        model: The model name to get encoding for.
-
-    Returns:
-        The tiktoken encoding for the model.
-    """
-    if model not in _TIKTOKEN_ENCODING_CACHE:
-        try:
-            _TIKTOKEN_ENCODING_CACHE[model] = tiktoken.encoding_for_model(model)
-        except KeyError:
-            logger.debug(
-                f"Encoding for model '{model}' not found, falling back to cl100k_base"
-            )
-            _TIKTOKEN_ENCODING_CACHE[model] = tiktoken.get_encoding("cl100k_base")
-    return _TIKTOKEN_ENCODING_CACHE[model]
 
 
 def create_openai_async_client(
@@ -194,6 +169,68 @@ def create_openai_async_client(
         | retry_if_exception_type(InvalidResponseError)
     ),
 )
+
+
+def extract_detailed_token_usage(usage):
+    """
+    Extract detailed token usage from OpenAI API usage object.
+
+    OpenAI provides detailed token breakdowns in newer models including:
+    - cached_tokens: Tokens served from cache
+    - reasoning_tokens: Tokens used for reasoning (o1 models)
+    - audio_tokens: Tokens for audio processing
+
+    Args:
+        usage: OpenAI usage object from API response
+
+    Returns:
+        dict: Token counts including detailed breakdown
+    """
+    # Basic token counts (always available) - handle None values from different providers
+    token_counts = {
+        "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+        "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+        "total_tokens": getattr(usage, "total_tokens", 0) or 0,
+    }
+
+    # Debug logging for troubleshooting different providers
+    logger.debug(f"Raw usage object attributes: {[attr for attr in dir(usage) if not attr.startswith('_')]}")
+    logger.debug(f"Basic token counts: prompt={token_counts['prompt_tokens']}, completion={token_counts['completion_tokens']}, total={token_counts['total_tokens']}")
+
+    # Extract detailed prompt token information
+    if hasattr(usage, "prompt_tokens_details") and usage.prompt_tokens_details:
+        prompt_details = usage.prompt_tokens_details
+        # Cached tokens are tokens that were served from cache
+        cached_tokens = getattr(prompt_details, "cached_tokens", 0) or 0
+        token_counts["cached_tokens"] = cached_tokens
+        token_counts["input_cached_tokens"] = cached_tokens  # Also store in detailed field
+
+        # Audio tokens for multimodal inputs
+        if hasattr(prompt_details, "audio_tokens"):
+            token_counts["input_audio_tokens"] = getattr(prompt_details, "audio_tokens", 0) or 0
+
+    # Extract detailed completion token information
+    if hasattr(usage, "completion_tokens_details") and usage.completion_tokens_details:
+        completion_details = usage.completion_tokens_details
+        # Reasoning tokens (used by o1 models for chain-of-thought)
+        if hasattr(completion_details, "reasoning_tokens"):
+            token_counts["output_reasoning_tokens"] = getattr(completion_details, "reasoning_tokens", 0) or 0
+
+        # Audio tokens for multimodal outputs
+        if hasattr(completion_details, "audio_tokens"):
+            token_counts["output_audio_tokens"] = getattr(completion_details, "audio_tokens", 0) or 0
+
+        # Prediction tokens (for certain model types)
+        if hasattr(completion_details, "accepted_prediction_tokens"):
+            token_counts["output_accepted_prediction_tokens"] = getattr(completion_details, "accepted_prediction_tokens", 0) or 0
+
+        if hasattr(completion_details, "rejected_prediction_tokens"):
+            token_counts["output_rejected_prediction_tokens"] = getattr(completion_details, "rejected_prediction_tokens", 0) or 0
+
+    logger.debug(f"Final extracted token counts: {token_counts}")
+    return token_counts
+
+
 async def openai_complete_if_cache(
     model: str,
     prompt: str,
@@ -308,8 +345,18 @@ async def openai_complete_if_cache(
     logger.debug(f"Client Configs: {client_configs}")
     logger.debug(f"Additional kwargs: {kwargs}")
     logger.debug(f"Num of history messages: {len(history_messages)}")
-    verbose_debug(f"System prompt: {system_prompt}")
-    verbose_debug(f"Query: {prompt}")
+
+    # Check if custom messages were provided (multi-message approach)
+    messages_param = kwargs.get("messages")
+    if messages_param:
+        logger.debug(f"Using custom messages: {len(messages_param)} messages")
+        verbose_debug(f"Message roles: {[msg.get('role') for msg in messages_param]}")
+        for i, msg in enumerate(messages_param):
+            verbose_debug(f"Message {i} ({msg.get('role')}): {msg.get('content', '')[:100]}...")
+    else:
+        verbose_debug(f"System prompt: {system_prompt}")
+        verbose_debug(f"Query: {prompt}")
+
     logger.debug("===== Sending Query to LLM =====")
 
     messages = kwargs.pop("messages", messages)
@@ -319,6 +366,21 @@ async def openai_complete_if_cache(
         kwargs["stream"] = stream
     if timeout is not None:
         kwargs["timeout"] = timeout
+
+    # Add prompt_cache_key for better caching (OpenAI recommends this over deprecated 'user' field)
+    # Use model name as cache key to group similar requests together
+    if "prompt_cache_key" not in kwargs:
+        kwargs["prompt_cache_key"] = f"lightrag-{model.replace('/', '-')}"
+        logger.debug(f"Using prompt_cache_key: {kwargs['prompt_cache_key']}")
+
+    # Add prompt_cache_retention for better cache persistence (only for standard OpenAI client)
+    # Langfuse wrapper doesn't support this parameter yet
+    if not LANGFUSE_ENABLED and "prompt_cache_retention" not in kwargs:
+        kwargs["prompt_cache_retention"] = "in-memory"  # Keep in memory for better persistence
+        logger.debug(f"Using prompt_cache_retention: {kwargs['prompt_cache_retention']}")
+    elif LANGFUSE_ENABLED:
+        logger.debug("Langfuse enabled - skipping prompt_cache_retention (not supported by Langfuse wrapper)")
+        logger.debug(f"Langfuse status: LANGFUSE_ENABLED={LANGFUSE_ENABLED}")
 
     # Determine the correct model identifier to use
     # For Azure OpenAI, we must use the deployment name instead of the model name
@@ -447,16 +509,18 @@ async def openai_complete_if_cache(
 
                 # After streaming is complete, track token usage
                 if token_tracker and final_chunk_usage:
-                    # Use actual usage from the API
-                    token_counts = {
-                        "prompt_tokens": getattr(final_chunk_usage, "prompt_tokens", 0),
-                        "completion_tokens": getattr(
-                            final_chunk_usage, "completion_tokens", 0
-                        ),
-                        "total_tokens": getattr(final_chunk_usage, "total_tokens", 0),
-                    }
+                    # Extract detailed token usage from OpenAI API
+                    token_counts = extract_detailed_token_usage(final_chunk_usage)
                     token_tracker.add_usage(token_counts)
                     logger.debug(f"Streaming token usage (from API): {token_counts}")
+
+                    # Log caching information if available
+                    if hasattr(final_chunk_usage, 'prompt_tokens_details') and final_chunk_usage.prompt_tokens_details:
+                        cached_tokens = getattr(final_chunk_usage.prompt_tokens_details, 'cached_tokens', 0)
+                        if cached_tokens > 0:
+                            logger.info(f"✅ Prompt caching active: {cached_tokens} tokens served from cache")
+                        else:
+                            logger.debug(f"ℹ️  No cached tokens in this request (cached_tokens: {cached_tokens})")
                 elif token_tracker:
                     logger.debug("No usage information available in streaming response")
             except Exception as e:
@@ -599,14 +663,16 @@ async def openai_complete_if_cache(
                 final_content = safe_unicode_decode(final_content.encode("utf-8"))
 
             if token_tracker and hasattr(response, "usage"):
-                token_counts = {
-                    "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
-                    "completion_tokens": getattr(
-                        response.usage, "completion_tokens", 0
-                    ),
-                    "total_tokens": getattr(response.usage, "total_tokens", 0),
-                }
+                token_counts = extract_detailed_token_usage(response.usage)
                 token_tracker.add_usage(token_counts)
+
+                # Log caching information if available
+                if hasattr(response.usage, 'prompt_tokens_details') and response.usage.prompt_tokens_details:
+                    cached_tokens = getattr(response.usage.prompt_tokens_details, 'cached_tokens', 0)
+                    if cached_tokens > 0:
+                        logger.info(f"✅ Prompt caching active: {cached_tokens} tokens served from cache")
+                    else:
+                        logger.debug(f"ℹ️  No cached tokens in this request (cached_tokens: {cached_tokens})")
 
             logger.debug(f"Response content len: {len(final_content)}")
             verbose_debug(f"Response: {response}")
@@ -702,9 +768,7 @@ async def nvidia_openai_complete(
     return result
 
 
-@wrap_embedding_func_with_attrs(
-    embedding_dim=1536, max_token_size=8192, model_name="text-embedding-3-small"
-)
+@wrap_embedding_func_with_attrs(embedding_dim=1536, max_token_size=8192)
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=4, max=60),
@@ -720,17 +784,15 @@ async def openai_embed(
     base_url: str | None = None,
     api_key: str | None = None,
     embedding_dim: int | None = None,
-    max_token_size: int | None = None,
     client_configs: dict[str, Any] | None = None,
     token_tracker: Any | None = None,
     use_azure: bool = False,
     azure_deployment: str | None = None,
     api_version: str | None = None,
 ) -> np.ndarray:
-    """Generate embeddings for a list of texts using OpenAI's API with automatic text truncation.
+    """Generate embeddings for a list of texts using OpenAI's API.
 
-    This function supports both standard OpenAI and Azure OpenAI services. It automatically
-    truncates texts that exceed the model's token limit to prevent API errors.
+    This function supports both standard OpenAI and Azure OpenAI services.
 
     Args:
         texts: List of texts to embed.
@@ -746,11 +808,6 @@ async def openai_embed(
             The dimension is controlled by the @wrap_embedding_func_with_attrs decorator.
             Manually passing a different value will trigger a warning and be ignored.
             When provided (by EmbeddingFunc), it will be passed to the OpenAI API for dimension reduction.
-        max_token_size: Maximum tokens per text. Texts exceeding this limit will be truncated.
-            **IMPORTANT**: This parameter is automatically injected by the EmbeddingFunc wrapper
-            when the underlying function signature supports it (via inspect.signature check).
-            The value is controlled by the @wrap_embedding_func_with_attrs decorator.
-            Set max_token_size=0 to disable truncation.
         client_configs: Additional configuration options for the AsyncOpenAI/AsyncAzureOpenAI client.
             These will override any default configurations but will be overridden by
             explicit parameters (api_key, base_url). Supports proxy configuration,
@@ -772,35 +829,6 @@ async def openai_embed(
         RateLimitError: If the OpenAI API rate limit is exceeded.
         APITimeoutError: If the OpenAI API request times out.
     """
-    # Apply text truncation if max_token_size is provided
-    if max_token_size is not None and max_token_size > 0:
-        encoding = _get_tiktoken_encoding_for_model(model)
-        truncated_texts = []
-        truncation_count = 0
-
-        for text in texts:
-            if not text:
-                truncated_texts.append(text)
-                continue
-
-            tokens = encoding.encode(text)
-            if len(tokens) > max_token_size:
-                truncated_tokens = tokens[:max_token_size]
-                truncated_texts.append(encoding.decode(truncated_tokens))
-                truncation_count += 1
-                logger.debug(
-                    f"Text truncated from {len(tokens)} to {max_token_size} tokens"
-                )
-            else:
-                truncated_texts.append(text)
-
-        if truncation_count > 0:
-            logger.info(
-                f"Truncated {truncation_count}/{len(texts)} texts to fit token limit ({max_token_size})"
-            )
-
-        texts = truncated_texts
-
     # Create the OpenAI client (supports both OpenAI and Azure)
     openai_async_client = create_openai_async_client(
         api_key=api_key,
@@ -930,11 +958,7 @@ async def azure_openai_complete(
     return result
 
 
-@wrap_embedding_func_with_attrs(
-    embedding_dim=1536,
-    max_token_size=8192,
-    model_name="my-text-embedding-3-large-deployment",
-)
+@wrap_embedding_func_with_attrs(embedding_dim=1536, max_token_size=8192)
 async def azure_openai_embed(
     texts: list[str],
     model: str | None = None,

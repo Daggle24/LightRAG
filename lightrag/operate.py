@@ -2830,10 +2830,10 @@ async def extract_entities(
         cache_keys_collector = []
 
         # Get initial extraction
-        # Format system prompt without input_text for each chunk (enables OpenAI prompt caching across chunks)
+        # Format system prompt once without input_text for OpenAI prompt caching
         entity_extraction_system_prompt = PROMPTS[
             "entity_extraction_system_prompt"
-        ].format(**context_base)
+        ].format(**{**context_base})
         # Format user prompts with input_text for each chunk
         entity_extraction_user_prompt = PROMPTS["entity_extraction_user_prompt"].format(
             **{**context_base, "input_text": content}
