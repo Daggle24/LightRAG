@@ -367,20 +367,9 @@ async def openai_complete_if_cache(
     if timeout is not None:
         kwargs["timeout"] = timeout
 
-    # Add prompt_cache_key for better caching (OpenAI recommends this over deprecated 'user' field)
-    # Use model name as cache key to group similar requests together
-    if "prompt_cache_key" not in kwargs:
-        kwargs["prompt_cache_key"] = f"lightrag-{model.replace('/', '-')}"
-        logger.debug(f"Using prompt_cache_key: {kwargs['prompt_cache_key']}")
-
-    # Add prompt_cache_retention for better cache persistence (only for standard OpenAI client)
-    # Langfuse wrapper doesn't support this parameter yet
-    if not LANGFUSE_ENABLED and "prompt_cache_retention" not in kwargs:
-        kwargs["prompt_cache_retention"] = "in-memory"  # Keep in memory for better persistence
-        logger.debug(f"Using prompt_cache_retention: {kwargs['prompt_cache_retention']}")
-    elif LANGFUSE_ENABLED:
-        logger.debug("Langfuse enabled - skipping prompt_cache_retention (not supported by Langfuse wrapper)")
-        logger.debug(f"Langfuse status: LANGFUSE_ENABLED={LANGFUSE_ENABLED}")
+    # Note: OpenAI's prompt caching works automatically for supported models
+    # (e.g., gpt-4o, gpt-4o-mini, gpt-4-turbo, gpt-3.5-turbo) based on prompt content.
+    # No additional parameters are needed to enable it.
 
     # Determine the correct model identifier to use
     # For Azure OpenAI, we must use the deployment name instead of the model name
@@ -396,6 +385,18 @@ async def openai_complete_if_cache(
             response = await openai_async_client.chat.completions.create(
                 model=api_model, messages=messages, **kwargs
             )
+        
+        # Log the raw response for debugging empty content issues
+        logger.debug(f"API Response received - ID: {getattr(response, 'id', 'N/A')}, Model: {getattr(response, 'model', 'N/A')}")
+        if hasattr(response, 'choices') and response.choices:
+            choice = response.choices[0]
+            logger.debug(f"First choice - finish_reason: {getattr(choice, 'finish_reason', 'N/A')}")
+            if hasattr(choice, 'message'):
+                msg = choice.message
+                logger.debug(f"Message - role: {getattr(msg, 'role', 'N/A')}, content length: {len(getattr(msg, 'content', '') or '')}, has_refusal: {hasattr(msg, 'refusal') and msg.refusal is not None}")
+                if hasattr(msg, 'refusal') and msg.refusal:
+                    logger.warning(f"⚠️  Model refused to respond: {msg.refusal}")
+        
     except APITimeoutError as e:
         logger.error(f"OpenAI API Timeout Error: {e}")
         await openai_async_client.close()  # Ensure client is closed
@@ -654,9 +655,35 @@ async def openai_complete_if_cache(
 
                 # Validate final content
                 if not final_content or final_content.strip() == "":
-                    logger.error("Received empty content from OpenAI API")
+                    finish_reason = getattr(message, 'finish_reason', 'N/A') if hasattr(response, 'choices') else 'N/A'
+                    error_details = {
+                        "model": model,
+                        "response_id": getattr(response, 'id', 'N/A'),
+                        "finish_reason": finish_reason,
+                        "has_refusal": hasattr(message, 'refusal') and message.refusal is not None,
+                        "refusal_message": getattr(message, 'refusal', None),
+                        "content_value": repr(content),
+                        "reasoning_content_value": repr(reasoning_content) if enable_cot else 'N/A (COT disabled)',
+                        "enable_cot": enable_cot,
+                    }
+                    logger.error(f"Received empty content from OpenAI API. Details: {error_details}")
+                    
+                    # If model refused, provide more specific error
+                    if hasattr(message, 'refusal') and message.refusal:
+                        await openai_async_client.close()
+                        raise InvalidResponseError(f"Model refused to respond: {message.refusal}")
+                    
+                    # Provide helpful error message with model suggestions
+                    error_msg = (
+                        f"Received empty content from OpenAI API.\n"
+                        f"Model: {model}\n"
+                        f"Response ID: {getattr(response, 'id', 'N/A')}\n"
+                        f"Finish reason: {finish_reason}\n"
+                        f"Content: {repr(content)}\n"
+                    )
+                    
                     await openai_async_client.close()  # Ensure client is closed
-                    raise InvalidResponseError("Received empty content from OpenAI API")
+                    raise InvalidResponseError(error_msg)
 
             # Apply Unicode decoding to final content if needed
             if r"\u" in final_content:
