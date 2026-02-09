@@ -2577,6 +2577,7 @@ class TokenTracker:
         self.total_tokens = 0
         self.cached_tokens = 0
         self.call_count = 0
+        self.model = None  # Track the model name
 
         # Detailed token breakdowns from OpenAI API
         self.input_cached_tokens = 0
@@ -2590,7 +2591,7 @@ class TokenTracker:
         """Add token usage from one LLM call.
 
         Args:
-            token_counts: A dictionary containing prompt_tokens, completion_tokens, total_tokens
+            token_counts: A dictionary containing prompt_tokens, completion_tokens, total_tokens, and optionally model
         """
         self.prompt_tokens += token_counts.get("prompt_tokens", 0)
         self.completion_tokens += token_counts.get("completion_tokens", 0)
@@ -2603,6 +2604,10 @@ class TokenTracker:
                 "prompt_tokens", 0
             ) + token_counts.get("completion_tokens", 0)
 
+        # Store model name if provided (use the first model seen)
+        if "model" in token_counts and self.model is None:
+            self.model = token_counts["model"]
+
         self.call_count += 1
 
     def get_usage(self):
@@ -2612,6 +2617,7 @@ class TokenTracker:
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
             "call_count": self.call_count,
+            "model": self.model or "unknown",  # Return "unknown" if no model was set
         }
 
     def __str__(self):

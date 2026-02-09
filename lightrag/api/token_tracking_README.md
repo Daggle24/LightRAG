@@ -259,34 +259,69 @@ Authorization: Bearer <BIZNDER_SERVICE_TOKEN>
 {
   "track_id": "upload_1234567890_abc123",
   "metrics": {
-    // Raw token counts
-    "prompt_tokens": 7648,
-    "completion_tokens": 7831,
-    "total_tokens": 15479,
-    "cached_tokens": 5632,
+    // Backend expected fields (primary)
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "inputTokens": 7648,
+    "outputTokens": 7831,
+    "cacheReadTokens": 5632,
+    "reasoningTokens": 6528,
+
+    // Additional detailed fields for internal use
+    "input": 2016,             // = prompt_tokens - cached_tokens
     "input_cached_tokens": 5632,
-    "input_audio_tokens": 0,
+    "call_count": 2,
+    "output": 1303,            // = completion_tokens - output_reasoning_tokens
     "output_reasoning_tokens": 6528,
-    "output_audio_tokens": 0,
     "output_accepted_prediction_tokens": 0,
     "output_rejected_prediction_tokens": 0,
-    "call_count": 2,
-    "model": "gpt-5-mini-2025-08-07",
-
-    // Derived fields matching Langfuse display format
-    "input_usage": 7648,      // = prompt_tokens
-    "input": 2016,             // = prompt_tokens - cached_tokens
-    "output_usage": 7831,      // = completion_tokens
-    "output": 1303,            // = completion_tokens - output_reasoning_tokens
     "total_usage": 15479       // = total_tokens
   }
 }
 ```
 
+**Field Mapping:**
+- `provider`: Always "openai" (auto-detected from model)
+- `model`: The actual model name used (e.g., "gpt-4o-mini", "gpt-4o")
+- `inputTokens`: Total input tokens (prompt_tokens)
+- `outputTokens`: Total output tokens (completion_tokens)
+- `cacheReadTokens`: Tokens served from cache
+- `reasoningTokens`: Reasoning tokens for o1/o3 models
+
 ### Automatic Sending
-- **Upload operations**: Metrics sent after background processing completes
+- **Upload operations**: Metrics sent automatically after `apipeline_process_enqueue_documents()` completes
+  - The system tracks which documents were processed in the session
+  - Collects token usage from all LLM calls during processing
+  - Sends metrics for each unique `track_id` that was processed
+  - Logs metrics in Langfuse-style format for visibility
 - **Query operations**: Metrics sent after each query completes
 - **Error handling**: Failures are logged but don't break the main operation
+
+### How Upload Metrics Work
+
+When documents are processed via `apipeline_process_enqueue_documents()`:
+
+1. **Before Processing**: System identifies all documents that will be processed (pending, processing, failed statuses) and collects their `track_id` values
+2. **During Processing**: Token usage is tracked via `TokenTracker` for all LLM calls
+3. **After Processing**: 
+   - Metrics are logged in Langfuse-style format
+   - `send_upload_metrics()` is called for each unique `track_id`
+   - Success/failure is logged for each metric transmission
+
+Example log output:
+```
+INFO: Enqueued document processing pipeline stopped
+INFO: 📊 Sending metrics for 1 track_id(s): upload_20250208_123456_abc123
+INFO: 
+Input usage
+7648
+input_cached_tokens
+5632
+input
+2016
+...
+INFO: ✅ Successfully sent metrics for track_id: upload_20250208_123456_abc123
+```
 
 ## Benefits
 

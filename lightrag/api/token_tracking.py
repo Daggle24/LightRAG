@@ -85,8 +85,65 @@ class TokenTrackingLightRAG:
         return await self._execute_with_tracking('apipeline_enqueue_documents', *args, **kwargs)
 
     async def apipeline_process_enqueue_documents(self, *args, **kwargs) -> None:
-        """Process enqueued documents with token tracking."""
-        return await self._execute_with_tracking('apipeline_process_enqueue_documents', *args, **kwargs)
+        """Process enqueued documents with token tracking and send metrics after completion."""
+        from lightrag.base import DocStatus
+        
+        # Get documents that are about to be processed (pending, processing, failed)
+        pending_docs, processing_docs, failed_docs = await asyncio.gather(
+            self._lightrag.doc_status.get_docs_by_status(DocStatus.PENDING),
+            self._lightrag.doc_status.get_docs_by_status(DocStatus.PROCESSING),
+            self._lightrag.doc_status.get_docs_by_status(DocStatus.FAILED),
+        )
+        
+        # Collect track_ids from documents that will be processed
+        track_ids_before = set()
+        for docs in [pending_docs, processing_docs, failed_docs]:
+            for doc_id, doc_status in docs.items():
+                if doc_status.track_id:
+                    track_ids_before.add(doc_status.track_id)
+        
+        # Create a fresh token tracker for this processing session
+        session_tracker = TokenTracker()
+        self.set_token_tracker(session_tracker)
+        
+        try:
+            # Execute the processing with tracking
+            result = await self._execute_with_tracking('apipeline_process_enqueue_documents', *args, **kwargs)
+            
+            # After processing completes, send metrics for the track_ids we processed
+            await self._send_processing_metrics(session_tracker, track_ids_before)
+            
+            return result
+        finally:
+            # Clear the token tracker after processing
+            self.set_token_tracker(None)
+
+    async def _send_processing_metrics(self, token_tracker: TokenTracker, track_ids: set) -> None:
+        """Send metrics for processed documents with the given track_ids."""
+        try:
+            # Get token usage metrics
+            usage = token_tracker.get_usage()
+            
+            # If we have metrics and track_ids, send them
+            if usage.get('total_tokens', 0) > 0 and track_ids:
+                logger.info(f"📊 Sending metrics for {len(track_ids)} track_id(s): {', '.join(sorted(track_ids))}")
+                
+                # Log the metrics in Langfuse style
+                logger.info(f"\n{format_langfuse_style_usage(usage)}")
+                
+                # Send metrics for each track_id
+                for track_id in track_ids:
+                    success = await send_upload_metrics(track_id, usage)
+                    if success:
+                        logger.info(f"✅ Successfully sent metrics for track_id: {track_id}")
+                    else:
+                        logger.warning(f"⚠️  Failed to send metrics for track_id: {track_id}")
+            else:
+                logger.debug(f"No metrics to send (tokens: {usage.get('total_tokens', 0)}, track_ids: {len(track_ids)})")
+                
+        except Exception as e:
+            logger.error(f"Error sending processing metrics: {str(e)}")
+            # Don't raise - metrics sending should not break the main flow
 
     # Delegate all other attributes/methods to the wrapped instance
     def __getattr__(self, name: str) -> Any:
@@ -162,14 +219,29 @@ async def send_metrics_to_backend(track_id: str, metrics: Dict[str, Any], operat
 
         total_usage = metrics.get("total_tokens", 0)
 
-        # Prepare the payload with raw fields + derived fields matching Langfuse format
+        # Extract model name and determine provider
+        model_name = metrics.get("model", "unknown")
+        
+        # Determine provider from model name
+        # OpenAI models: gpt-*, o1-*, o3-*, text-embedding-*
+        # Azure OpenAI: same models but via Azure
+        # For now, default to "openai" as the primary provider
+        provider = "openai"
+        
+        # Prepare the payload matching backend's expected format
         backend_metrics = {
+            # Backend expected fields
+            "provider": provider,
+            "model": model_name,
+            "inputTokens": prompt_tokens,
+            "outputTokens": completion_tokens,
+            "cacheReadTokens": cached_tokens,
+            "reasoningTokens": reasoning_tokens,
+            
+            # Additional detailed fields for internal use
             "input": input_regular,
             "input_cached_tokens": metrics.get("input_cached_tokens", 0),
-            
             "call_count": metrics.get("call_count", 0),
-            "model": metrics.get("model", "unknown"),
-            
             "output": output_regular,
             "output_reasoning_tokens": output_reasoning_tokens,
             "output_accepted_prediction_tokens": output_accepted_prediction_tokens,
