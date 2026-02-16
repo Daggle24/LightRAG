@@ -42,7 +42,7 @@ class TokenTrackingLightRAG:
         @wraps(original_func)
         async def tracked_llm_func(*args, **kwargs):
             # Add token_tracker to kwargs if not already present
-            kwargs['token_tracker'] = self._token_tracker
+            kwargs["token_tracker"] = self._token_tracker
             return await original_func(*args, **kwargs)
 
         return tracked_llm_func
@@ -59,7 +59,9 @@ class TokenTrackingLightRAG:
 
         try:
             # Replace with tracked version
-            self._lightrag.llm_model_func = self._create_tracked_llm_func(original_llm_func)
+            self._lightrag.llm_model_func = self._create_tracked_llm_func(
+                original_llm_func
+            )
 
             # Execute the method
             method = getattr(self._lightrag, method_name)
@@ -74,73 +76,87 @@ class TokenTrackingLightRAG:
     # Key methods that should be tracked
     async def ainsert(self, *args, **kwargs) -> str:
         """Insert documents with token tracking."""
-        return await self._execute_with_tracking('ainsert', *args, **kwargs)
+        return await self._execute_with_tracking("ainsert", *args, **kwargs)
 
     async def aquery_llm(self, *args, **kwargs) -> dict[str, Any]:
         """Query with LLM with token tracking."""
-        return await self._execute_with_tracking('aquery_llm', *args, **kwargs)
+        return await self._execute_with_tracking("aquery_llm", *args, **kwargs)
 
     async def apipeline_enqueue_documents(self, *args, **kwargs) -> None:
         """Enqueue documents for processing with token tracking."""
-        return await self._execute_with_tracking('apipeline_enqueue_documents', *args, **kwargs)
+        return await self._execute_with_tracking(
+            "apipeline_enqueue_documents", *args, **kwargs
+        )
 
     async def apipeline_process_enqueue_documents(self, *args, **kwargs) -> None:
         """Process enqueued documents with token tracking and send metrics after completion."""
         from lightrag.base import DocStatus
-        
+
         # Get documents that are about to be processed (pending, processing, failed)
         pending_docs, processing_docs, failed_docs = await asyncio.gather(
             self._lightrag.doc_status.get_docs_by_status(DocStatus.PENDING),
             self._lightrag.doc_status.get_docs_by_status(DocStatus.PROCESSING),
             self._lightrag.doc_status.get_docs_by_status(DocStatus.FAILED),
         )
-        
+
         # Collect track_ids from documents that will be processed
         track_ids_before = set()
         for docs in [pending_docs, processing_docs, failed_docs]:
             for doc_id, doc_status in docs.items():
                 if doc_status.track_id:
                     track_ids_before.add(doc_status.track_id)
-        
+
         # Create a fresh token tracker for this processing session
         session_tracker = TokenTracker()
         self.set_token_tracker(session_tracker)
-        
+
         try:
             # Execute the processing with tracking
-            result = await self._execute_with_tracking('apipeline_process_enqueue_documents', *args, **kwargs)
-            
+            result = await self._execute_with_tracking(
+                "apipeline_process_enqueue_documents", *args, **kwargs
+            )
+
             # After processing completes, send metrics for the track_ids we processed
             await self._send_processing_metrics(session_tracker, track_ids_before)
-            
+
             return result
         finally:
             # Clear the token tracker after processing
             self.set_token_tracker(None)
 
-    async def _send_processing_metrics(self, token_tracker: TokenTracker, track_ids: set) -> None:
+    async def _send_processing_metrics(
+        self, token_tracker: TokenTracker, track_ids: set
+    ) -> None:
         """Send metrics for processed documents with the given track_ids."""
         try:
             # Get token usage metrics
             usage = token_tracker.get_usage()
-            
+
             # If we have metrics and track_ids, send them
-            if usage.get('total_tokens', 0) > 0 and track_ids:
-                logger.info(f"📊 Sending metrics for {len(track_ids)} track_id(s): {', '.join(sorted(track_ids))}")
-                
+            if usage.get("total_tokens", 0) > 0 and track_ids:
+                logger.info(
+                    f"📊 Sending metrics for {len(track_ids)} track_id(s): {', '.join(sorted(track_ids))}"
+                )
+
                 # Log the metrics in Langfuse style
                 logger.info(f"\n{format_langfuse_style_usage(usage)}")
-                
+
                 # Send metrics for each track_id
                 for track_id in track_ids:
                     success = await send_upload_metrics(track_id, usage)
                     if success:
-                        logger.info(f"✅ Successfully sent metrics for track_id: {track_id}")
+                        logger.info(
+                            f"✅ Successfully sent metrics for track_id: {track_id}"
+                        )
                     else:
-                        logger.warning(f"⚠️  Failed to send metrics for track_id: {track_id}")
+                        logger.warning(
+                            f"⚠️  Failed to send metrics for track_id: {track_id}"
+                        )
             else:
-                logger.debug(f"No metrics to send (tokens: {usage.get('total_tokens', 0)}, track_ids: {len(track_ids)})")
-                
+                logger.debug(
+                    f"No metrics to send (tokens: {usage.get('total_tokens', 0)}, track_ids: {len(track_ids)})"
+                )
+
         except Exception as e:
             logger.error(f"Error sending processing metrics: {str(e)}")
             # Don't raise - metrics sending should not break the main flow
@@ -173,7 +189,9 @@ async def create_tracked_lightrag(lightrag_instance: LightRAG) -> TokenTrackingL
 
 
 @asynccontextmanager
-async def track_lightrag_operations(lightrag_instance: LightRAG, token_tracker: Optional[TokenTracker] = None):
+async def track_lightrag_operations(
+    lightrag_instance: LightRAG, token_tracker: Optional[TokenTracker] = None
+):
     """Context manager for tracking token usage in LightRAG operations."""
     tracker = TokenTrackingLightRAG(lightrag_instance)
 
@@ -182,7 +200,9 @@ async def track_lightrag_operations(lightrag_instance: LightRAG, token_tracker: 
 
 
 # Backend integration functions
-async def send_metrics_to_backend(track_id: str, metrics: Dict[str, Any], operation_type: str = "unknown") -> bool:
+async def send_metrics_to_backend(
+    track_id: str, metrics: Dict[str, Any], operation_type: str = "unknown"
+) -> bool:
     """
     Send metrics to the backend billing system.
 
@@ -200,7 +220,9 @@ async def send_metrics_to_backend(track_id: str, metrics: Dict[str, Any], operat
         service_token = os.getenv("BIZNDER_SERVICE_TOKEN")
 
         if not api_base_url or not service_token:
-            logger.warning("BIZNDER_API_BASE_URL or BIZNDER_SERVICE_TOKEN not configured, skipping metrics send")
+            logger.warning(
+                "BIZNDER_API_BASE_URL or BIZNDER_SERVICE_TOKEN not configured, skipping metrics send"
+            )
             return False
 
         # Prepare the webhook URL
@@ -214,20 +236,34 @@ async def send_metrics_to_backend(track_id: str, metrics: Dict[str, Any], operat
         input_regular = prompt_tokens - cached_tokens  # Uncached input tokens
         output_reasoning_tokens = reasoning_tokens
         output_regular = completion_tokens - reasoning_tokens  # Regular output tokens
-        output_accepted_prediction_tokens = metrics.get("output_accepted_prediction_tokens", 0)
-        output_rejected_prediction_tokens = metrics.get("output_rejected_prediction_tokens", 0)
+        output_accepted_prediction_tokens = metrics.get(
+            "output_accepted_prediction_tokens", 0
+        )
+        output_rejected_prediction_tokens = metrics.get(
+            "output_rejected_prediction_tokens", 0
+        )
 
         total_usage = metrics.get("total_tokens", 0)
 
-        # Extract model name and determine provider
-        model_name = metrics.get("model", "unknown")
-        
-        # Determine provider from model name
-        # OpenAI models: gpt-*, o1-*, o3-*, text-embedding-*
-        # Azure OpenAI: same models but via Azure
-        # For now, default to "openai" as the primary provider
+        # Extract model name for billing (must be the actual model, not provider name)
+        raw_model = metrics.get("model", "unknown")
+        # Backend pricing lookup uses provider+model (e.g. openai/gpt-4o-mini). If the
+        # tracker has "openai" or "unknown", use configured LLM model so we don't send
+        # openai/openai and hit the fallback.
+        if raw_model in (None, "", "unknown", "openai"):
+            raw_model = os.getenv("LLM_MODEL", "unknown")
+        # Never send provider name as model (would cause openai/openai and fallback pricing)
+        if raw_model in (None, "", "openai"):
+            raw_model = "unknown"
+        model_name = raw_model or "unknown"
+
+        # Determine provider from model name for pricing lookup
         provider = "openai"
-        
+
+        logger.info(
+            f"Sending metrics to backend: provider={provider}, model={model_name}"
+        )
+
         # Prepare the payload matching backend's expected format
         backend_metrics = {
             # Backend expected fields
@@ -237,7 +273,6 @@ async def send_metrics_to_backend(track_id: str, metrics: Dict[str, Any], operat
             "outputTokens": completion_tokens,
             "cacheReadTokens": cached_tokens,
             "reasoningTokens": reasoning_tokens,
-            
             # Additional detailed fields for internal use
             "input": input_regular,
             "input_cached_tokens": metrics.get("input_cached_tokens", 0),
@@ -246,13 +281,10 @@ async def send_metrics_to_backend(track_id: str, metrics: Dict[str, Any], operat
             "output_reasoning_tokens": output_reasoning_tokens,
             "output_accepted_prediction_tokens": output_accepted_prediction_tokens,
             "output_rejected_prediction_tokens": output_rejected_prediction_tokens,
-            "total_usage": total_usage
+            "total_usage": total_usage,
         }
 
-        payload = {
-            "track_id": track_id,
-            "metrics": backend_metrics
-        }
+        payload = {"track_id": track_id, "metrics": backend_metrics}
 
         # Send the request
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -261,19 +293,25 @@ async def send_metrics_to_backend(track_id: str, metrics: Dict[str, Any], operat
                 json=payload,
                 headers={
                     "Authorization": f"Bearer {service_token}",
-                    "Content-Type": "application/json"
-                }
+                    "Content-Type": "application/json",
+                },
             )
 
             if response.status_code in [200, 201, 202]:
-                logger.info(f"Successfully sent metrics for track_id {track_id} to backend")
+                logger.info(
+                    f"Successfully sent metrics for track_id {track_id} to backend"
+                )
                 return True
             else:
-                logger.error(f"Failed to send metrics for track_id {track_id}: HTTP {response.status_code} - {response.text}")
+                logger.error(
+                    f"Failed to send metrics for track_id {track_id}: HTTP {response.status_code} - {response.text}"
+                )
                 return False
 
     except Exception as e:
-        logger.error(f"Error sending metrics for track_id {track_id} to backend: {str(e)}")
+        logger.error(
+            f"Error sending metrics for track_id {track_id} to backend: {str(e)}"
+        )
         return False
 
 
@@ -316,9 +354,13 @@ def format_langfuse_style_usage(usage: Dict[str, Any]) -> str:
     output_usage = completion_tokens
     output_reasoning_tokens = reasoning_tokens
     output_regular = completion_tokens - reasoning_tokens  # Regular output tokens
-    output_accepted_prediction_tokens = usage.get("output_accepted_prediction_tokens", 0)
+    output_accepted_prediction_tokens = usage.get(
+        "output_accepted_prediction_tokens", 0
+    )
     output_audio_tokens = usage.get("output_audio_tokens", 0)
-    output_rejected_prediction_tokens = usage.get("output_rejected_prediction_tokens", 0)
+    output_rejected_prediction_tokens = usage.get(
+        "output_rejected_prediction_tokens", 0
+    )
 
     # Total usage
     total_usage = usage.get("total_tokens", 0)
@@ -346,7 +388,7 @@ def format_langfuse_style_usage(usage: Dict[str, Any]) -> str:
         "output_rejected_prediction_tokens",
         f"{output_rejected_prediction_tokens:,}",
         "Total usage",
-        f"{total_usage:,}"
+        f"{total_usage:,}",
     ]
 
     return "\n".join(lines)

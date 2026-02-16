@@ -2,6 +2,7 @@
 LightRAG FastAPI Server
 """
 
+import asyncio
 import configparser
 import logging
 import logging.config
@@ -356,68 +357,101 @@ def create_app(args):
         return doc_manager_cache[workspace]
 
     rag_cache = {}
+    _rag_init_locks: dict[str, asyncio.Lock] = {}  # Per-workspace init locks
+    _rag_init_locks_guard = asyncio.Lock()  # Guard for creating per-workspace locks
 
     async def create_rag(request: Request | None) -> TokenTrackingLightRAG:
-        """Create or retrieve LightRAG instance for the current workspace"""
+        """Create or retrieve LightRAG instance for the current workspace.
+
+        Uses per-workspace locking to prevent race conditions when multiple
+        concurrent requests trigger initialization of the same workspace.
+        """
         workspace = args.workspace
         if request is not None:
             workspace = get_workspace_from_request(request, args.workspace)
 
         logger.debug(f"Using LightRAG instance for workspace: '{workspace}'")
+
+        # Fast path: return cached instance without locking
         if workspace in rag_cache:
             return rag_cache[workspace]
 
-        # Create ollama_server_infos from command line arguments
-        from lightrag.api.config import OllamaServerInfos
+        # Slow path: acquire per-workspace lock to prevent concurrent initialization
+        async with _rag_init_locks_guard:
+            if workspace not in _rag_init_locks:
+                _rag_init_locks[workspace] = asyncio.Lock()
+            workspace_lock = _rag_init_locks[workspace]
 
-        ollama_server_infos = OllamaServerInfos(name=args.simulated_model_name, tag=args.simulated_model_tag)
+        async with workspace_lock:
+            # Double-check after acquiring lock (another request may have initialized it)
+            if workspace in rag_cache:
+                return rag_cache[workspace]
 
-        # Initialize RAG with unified configuration
-        try:
-            rag = LightRAG(
-                working_dir=args.working_dir,
-                workspace=workspace,
-                llm_model_func=create_llm_model_func(args.llm_binding),
-                llm_model_name=args.llm_model,
-                llm_model_max_async=args.max_async,
-                summary_max_tokens=args.summary_max_tokens,
-                summary_context_size=args.summary_context_size,
-                chunk_token_size=int(args.chunk_size),
-                chunk_overlap_token_size=int(args.chunk_overlap_size),
-                llm_model_kwargs=create_llm_model_kwargs(args.llm_binding, args, llm_timeout),
-                embedding_func=embedding_func,
-                default_llm_timeout=llm_timeout,
-                default_embedding_timeout=embedding_timeout,
-                kv_storage=args.kv_storage,
-                graph_storage=args.graph_storage,
-                vector_storage=args.vector_storage,
-                doc_status_storage=args.doc_status_storage,
-                vector_db_storage_cls_kwargs={"cosine_better_than_threshold": args.cosine_threshold},
-                enable_llm_cache_for_entity_extract=args.enable_llm_cache_for_extract,
-                enable_llm_cache=args.enable_llm_cache,
-                rerank_model_func=rerank_model_func,
-                max_parallel_insert=args.max_parallel_insert,
-                max_graph_nodes=args.max_graph_nodes,
-                addon_params={
-                    "language": args.summary_language,
-                    "entity_types": args.entity_types,
-                },
-                ollama_server_infos=ollama_server_infos,
+            logger.info(f"Initializing LightRAG for workspace: '{workspace}'")
+
+            # Create ollama_server_infos from command line arguments
+            from lightrag.api.config import OllamaServerInfos
+
+            ollama_server_infos = OllamaServerInfos(
+                name=args.simulated_model_name, tag=args.simulated_model_tag
             )
 
-            # Initialize database connections
-            # Note: initialize_storages() now auto-initializes pipeline_status for rag.workspace
-            await rag.initialize_storages()
+            # Initialize RAG with unified configuration
+            try:
+                rag = LightRAG(
+                    working_dir=args.working_dir,
+                    workspace=workspace,
+                    llm_model_func=create_llm_model_func(args.llm_binding),
+                    llm_model_name=args.llm_model,
+                    llm_model_max_async=args.max_async,
+                    summary_max_tokens=args.summary_max_tokens,
+                    summary_context_size=args.summary_context_size,
+                    chunk_token_size=int(args.chunk_size),
+                    chunk_overlap_token_size=int(args.chunk_overlap_size),
+                    llm_model_kwargs=create_llm_model_kwargs(
+                        args.llm_binding, args, llm_timeout
+                    ),
+                    embedding_func=embedding_func,
+                    default_llm_timeout=llm_timeout,
+                    default_embedding_timeout=embedding_timeout,
+                    kv_storage=args.kv_storage,
+                    graph_storage=args.graph_storage,
+                    vector_storage=args.vector_storage,
+                    doc_status_storage=args.doc_status_storage,
+                    vector_db_storage_cls_kwargs={
+                        "cosine_better_than_threshold": args.cosine_threshold
+                    },
+                    enable_llm_cache_for_entity_extract=args.enable_llm_cache_for_extract,
+                    enable_llm_cache=args.enable_llm_cache,
+                    rerank_model_func=rerank_model_func,
+                    max_parallel_insert=args.max_parallel_insert,
+                    max_graph_nodes=args.max_graph_nodes,
+                    addon_params={
+                        "language": args.summary_language,
+                        "entity_types": args.entity_types,
+                    },
+                    ollama_server_infos=ollama_server_infos,
+                )
 
-            # Data migration regardless of storage implementation
-            await rag.check_and_migrate_data()
+                # Initialize database connections
+                # Note: initialize_storages() now auto-initializes pipeline_status for rag.workspace
+                await rag.initialize_storages()
 
-            # Wrap with token tracking
-            tracked_rag = TokenTrackingLightRAG(rag)
-            rag_cache[workspace] = tracked_rag
-        except Exception as e:
-            logger.error(f"Failed to initialize LightRAG: {e}")
-            raise
+                # Data migration regardless of storage implementation
+                await rag.check_and_migrate_data()
+
+                # Wrap with token tracking
+                tracked_rag = TokenTrackingLightRAG(rag)
+                rag_cache[workspace] = tracked_rag
+
+                logger.info(f"LightRAG initialized for workspace: '{workspace}'")
+                return tracked_rag
+            except Exception as e:
+                logger.error(
+                    f"Failed to initialize LightRAG for workspace '{workspace}': {e}"
+                )
+                raise
+
     # RAGAnything cache for multimodal processing
     raganything_cache = {}
 
@@ -431,7 +465,12 @@ def create_app(args):
         vision_api_key = args.vision_binding_api_key or args.llm_binding_api_key
 
         def vision_model_func(
-            prompt, system_prompt=None, history_messages=[], image_data=None, messages=None, **kwargs
+            prompt,
+            system_prompt=None,
+            history_messages=[],
+            image_data=None,
+            messages=None,
+            **kwargs,
         ):
             # If messages format is provided (for multimodal VLM enhanced query), use it directly
             if messages:
@@ -488,7 +527,7 @@ def create_app(args):
         if not args.enable_raganything:
             raise HTTPException(
                 status_code=400,
-                detail="RAGAnything is not enabled. Set ENABLE_RAGANYTHING=true"
+                detail="RAGAnything is not enabled. Set ENABLE_RAGANYTHING=true",
             )
 
         workspace = args.workspace
@@ -519,7 +558,7 @@ def create_app(args):
             logger.error(f"Failed to import RAGAnything: {e}")
             raise HTTPException(
                 status_code=500,
-                detail="RAGAnything is not installed. Install with: pip install raganything"
+                detail="RAGAnything is not installed. Install with: pip install raganything",
             )
         except Exception as e:
             logger.error(f"Failed to initialize RAGAnything: {e}")
@@ -1228,7 +1267,7 @@ def create_app(args):
     app.include_router(create_query_routes(create_rag, api_key, args.top_k))
     app.include_router(create_graph_routes(create_rag, api_key))
 
-     # Add multimodal routes (RAGAnything integration)
+    # Add multimodal routes (RAGAnything integration)
     if args.enable_raganything:
         app.include_router(
             create_multimodal_routes(
@@ -1240,7 +1279,9 @@ def create_app(args):
         )
         logger.info("RAGAnything multimodal routes enabled")
     else:
-        logger.info("RAGAnything multimodal routes disabled (set ENABLE_RAGANYTHING=true to enable)")
+        logger.info(
+            "RAGAnything multimodal routes disabled (set ENABLE_RAGANYTHING=true to enable)"
+        )
 
     # Add Ollama API routes
     ollama_api = OllamaAPI(create_rag, top_k=args.top_k, api_key=api_key)
@@ -1375,6 +1416,11 @@ def create_app(args):
         """Get current system status including WebUI availability"""
         try:
             workspace = get_workspace_from_request(request, get_default_workspace())
+
+            # Ensure the workspace is initialized (lazy init for multi-tenant)
+            # This will create the RAG instance and pipeline_status if needed
+            await create_rag(request)
+
             pipeline_status = await get_namespace_data(
                 "pipeline_status", workspace=workspace
             )
