@@ -35,7 +35,7 @@ from ..base import (
 from ..exceptions import DataMigrationError
 from ..namespace import NameSpace, is_namespace
 from ..utils import logger
-from ..kg.shared_storage import get_data_init_lock
+from ..kg.shared_storage import get_data_init_lock, get_default_workspace
 
 import pipmaster as pm
 
@@ -2429,7 +2429,7 @@ class PGVectorStorage(BaseVectorStorage):
             raise ValueError(f"No DDL template found for table: {base_table}")
 
         ddl_template = TABLES[base_table]["ddl"]
-        
+
         # Determine vector column type based on configuration
         # HALFVEC is used when HNSW_HALFVEC is selected
         vector_type = "VECTOR"
@@ -2437,7 +2437,9 @@ class PGVectorStorage(BaseVectorStorage):
             vector_type = "HALFVEC"
 
         # Replace embedding dimension placeholder if exists
-        ddl = ddl_template.replace("VECTOR(dimension)", f"{vector_type}({embedding_dim})")
+        ddl = ddl_template.replace(
+            "VECTOR(dimension)", f"{vector_type}({embedding_dim})"
+        )
 
         # Replace table name
         ddl = ddl.replace(base_table, table_name)
@@ -3178,34 +3180,83 @@ class PGVectorStorage(BaseVectorStorage):
         if not ids:
             return {}
 
-        ids_str = ",".join([f"'{id}'" for id in ids])
-        query = f"SELECT id, content_vector FROM {self.table_name} WHERE workspace=$1 AND id IN ({ids_str})"
-        params = {"workspace": self.workspace}
+        def _query(workspace: str) -> tuple[list, dict]:
+            ids_str = ",".join([f"'{id}'" for id in ids])
+            query = f"SELECT id, content_vector FROM {self.table_name} WHERE workspace=$1 AND id IN ({ids_str})"
+            params = {"workspace": workspace}
+            return query, params
 
-        try:
+        async def _run_query(workspace: str) -> dict[str, list[float]]:
+            query, params = _query(workspace)
             results = await self.db.query(query, list(params.values()), multirows=True)
             vectors_dict = {}
-
             for result in results:
                 if result and "content_vector" in result and "id" in result:
                     try:
                         vector_data = result["content_vector"]
-                        # Handle both pgvector-registered connections (returns list/tuple)
-                        # and non-registered connections (returns JSON string)
+                        if vector_data is None:
+                            continue
                         if isinstance(vector_data, (list, tuple)):
                             vectors_dict[result["id"]] = list(vector_data)
                         elif isinstance(vector_data, str):
                             parsed = json.loads(vector_data)
                             if isinstance(parsed, list):
                                 vectors_dict[result["id"]] = parsed
-                        # Handle numpy arrays from pgvector
                         elif hasattr(vector_data, "tolist"):
                             vectors_dict[result["id"]] = vector_data.tolist()
-                    except (json.JSONDecodeError, TypeError) as e:
+                        elif hasattr(vector_data, "to_list") and callable(
+                            vector_data.to_list
+                        ):
+                            # pgvector HalfVector (HALFVEC / HNSW_HALFVEC)
+                            vectors_dict[result["id"]] = vector_data.to_list()
+                        elif hasattr(vector_data, "to_numpy") and callable(
+                            vector_data.to_numpy
+                        ):
+                            vectors_dict[result["id"]] = vector_data.to_numpy().tolist()
+                        else:
+                            # pgvector asyncpg codec can return array-like (e.g. Vector); convert via numpy
+                            vectors_dict[result["id"]] = np.asarray(
+                                vector_data, dtype=np.float64
+                            ).tolist()
+                    except (json.JSONDecodeError, TypeError, ValueError) as e:
                         logger.warning(
                             f"[{self.workspace}] Failed to parse vector data for ID {result['id']}: {e}"
                         )
+            return vectors_dict
 
+        try:
+            vectors_dict = await _run_query(self.workspace)
+            # If no vectors found for current workspace, try fallback workspaces
+            # (handles data indexed before workspace isolation: "", "default", or server default)
+            if not vectors_dict:
+                default_ws = get_default_workspace()
+                # Deduplicate and skip current workspace (handles "" from default + explicit "")
+                to_try = list(
+                    dict.fromkeys(
+                        w
+                        for w in (default_ws, "", "default")
+                        if w is not None and w != self.workspace
+                    )
+                )
+                if to_try:
+                    logger.info(
+                        f"[{self.workspace}] No chunk vectors in current workspace "
+                        f"(requested {len(ids)} IDs); trying fallback workspaces: {to_try}"
+                    )
+                for fallback_workspace in to_try:
+                    vectors_dict = await _run_query(fallback_workspace)
+                    if vectors_dict:
+                        logger.warning(
+                            f"[{self.workspace}] No chunk vectors in current workspace; "
+                            f"used {len(vectors_dict)} vectors from fallback workspace {repr(fallback_workspace)}. "
+                            "Re-index documents with the workspace header to fix."
+                        )
+                        break
+                if not vectors_dict and to_try:
+                    logger.warning(
+                        f"[{self.workspace}] No chunk vectors in current or fallback workspaces "
+                        f"(tried: {to_try}). Table: {self.table_name}. Re-index documents for this workspace."
+                    )
             return vectors_dict
         except Exception as e:
             logger.error(

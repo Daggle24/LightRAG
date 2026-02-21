@@ -246,6 +246,7 @@ Consider the conversation history if provided to maintain conversational flow an
 
 4. References Section Format:
   - The References section should be under heading: `### References`
+  - Use ONLY the exact document titles from the `Reference Document List` in the Context; copy them character-for-character. Do not invent, paraphrase, or substitute any reference title.
   - Reference list entries should adhere to the format: `* [n] Document Title`. Do not include a caret (`^`) after opening square bracket (`[`).
   - The Document Title in the citation must retain its original language.
   - Output each citation on an individual line
@@ -373,6 +374,7 @@ Consider the conversation history if provided to maintain conversational flow an
 
 4. References Section Format:
   - The References section should be under heading: `### References`
+  - Use ONLY the exact document titles from the `Reference Document List` in the Context; copy them character-for-character. Do not invent, paraphrase, or substitute any reference title.
   - Reference list entries should adhere to the format: `* [n] Document Title`. Do not include a caret (`^`) after opening square bracket (`[`).
   - The Document Title in the citation must retain its original language.
   - Output each citation on an individual line

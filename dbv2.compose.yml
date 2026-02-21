@@ -1,0 +1,38 @@
+# 🚀 bizinder-rag-engine Agent - Unified Docker Compose
+# 7 Services: Agent UI, Agent API, bizinder-rag-engine API, PostgreSQL, Neo4j, MCP Server
+
+services:
+  # =================== DATABASE SERVICES ===================
+
+  postgres:
+    image: gzdaniel/postgres-for-rag:16.6
+    container_name: bizinder-rag-engine-postgres-multitenant
+    restart: unless-stopped
+    ports:
+      - "5435:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ai}
+      POSTGRES_DB: ${POSTGRES_DATABASE:-ai}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    networks:
+      - bizinder-rag-engine-network
+    command: sh -c "service postgresql start && sleep infinity"
+networks:
+  bizinder-rag-engine-network:
+    driver: bridge
+    name: bizinder-rag-engine-network
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.25.0.0/16
+
+# =================== VOLUMES ===================
+
+volumes:
+  pgdata:
+    driver: local
+    name: bizinder-rag-engine-pgdata
+  user_files:
+    driver: local
+    name: bizinder-rag-engine-user-files

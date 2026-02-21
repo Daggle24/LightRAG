@@ -3365,3 +3365,31 @@ def generate_reference_list_from_chunks(
         reference_list.append({"reference_id": str(i + 1), "file_path": file_path})
 
     return reference_list, updated_chunks
+
+
+def replace_references_section(response_text: str, reference_list: list[dict]) -> str:
+    """
+    Replace the LLM-generated References section with one built from the actual
+    reference list (ground truth from retrieved chunks). This prevents the model
+    from citing non-existent document titles.
+
+    reference_list: list of {"reference_id": str, "file_path": str} from
+                    generate_reference_list_from_chunks.
+    """
+    if not response_text or not reference_list:
+        return response_text
+    # Match common References heading patterns (prompt asks for "### References")
+    ref_heading = re.compile(
+        r"\n\s*###\s+References\s*\n|\n\s*##\s+References\s*\n|\n\s*\*\*References\*\*\s*\n|\n\s*References\s*\n",
+        re.IGNORECASE,
+    )
+    match = ref_heading.search(response_text)
+    if not match:
+        return response_text
+    start = match.start()
+    canonical = "\n\n### References\n\n" + "\n".join(
+        f"- [{ref.get('reference_id', '')}] {ref.get('file_path', '')}"
+        for ref in reference_list
+        if ref.get("reference_id")
+    )
+    return response_text[:start].rstrip() + canonical

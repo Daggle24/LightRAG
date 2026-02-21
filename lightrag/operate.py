@@ -36,6 +36,7 @@ from lightrag.utils import (
     fix_tuple_delimiter_corruption,
     convert_to_user_format,
     generate_reference_list_from_chunks,
+    replace_references_section,
     apply_source_ids_limit,
     merge_source_ids,
     make_relation_chunk_key,
@@ -3209,6 +3210,10 @@ async def kg_query(
                 .replace("</system>", "")
                 .strip()
             )
+        # Replace LLM-generated References section with ground-truth from retrieved chunks
+        refs = (context_result.raw_data or {}).get("data", {}).get("references", [])
+        if refs:
+            response = replace_references_section(response, refs)
 
         return QueryResult(content=response, raw_data=context_result.raw_data)
     else:
@@ -4991,6 +4996,10 @@ async def naive_query(
                 .replace("</system>", "")
                 .strip()
             )
+        # Replace LLM-generated References section with ground-truth from retrieved chunks
+        refs = (raw_data or {}).get("data", {}).get("references", [])
+        if refs:
+            response = replace_references_section(response, refs)
 
         return QueryResult(content=response, raw_data=raw_data)
     else:
