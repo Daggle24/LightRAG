@@ -330,18 +330,14 @@ Key contributing factors include:
 
 --- FIN DE EJEMPLOS ---
 IMPORTANTE: Imita el tono, estructura, nivel de detalle y formalidad de estos ejemplos en todas tus respuestas
-"""
 
-# Dynamic context template (goes in user message)
-PROMPTS["rag_response_context"] = """---Context---
+6. Additional Instructions: {user_prompt}
+
+
+---Context---
 
 {context_data}
-
----Additional Instructions---
-
-{user_prompt}
 """
-
 
 PROMPTS["naive_rag_response"] = """---Role---
 
