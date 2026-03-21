@@ -4010,13 +4010,15 @@ class PGGraphStorage(BaseGraphStorage):
         namespace = self.namespace
 
         if workspace and workspace.strip() and workspace.strip().lower() != "default":
-            # Ensure names comply with PostgreSQL identifier specifications
             safe_workspace = re.sub(r"[^a-zA-Z0-9_]", "_", workspace.strip())
             safe_namespace = re.sub(r"[^a-zA-Z0-9_]", "_", namespace)
-            return f"{safe_workspace}_{safe_namespace}"
+            graph_name = f"{safe_workspace}_{safe_namespace}"
         else:
-            # When the workspace is "default", use the namespace directly (for backward compatibility with legacy implementations)
-            return re.sub(r"[^a-zA-Z0-9_]", "_", namespace)
+            graph_name = re.sub(r"[^a-zA-Z0-9_]", "_", namespace)
+        # AGE graph names must start with a letter or underscore (SQL identifier rule)
+        if graph_name and graph_name[0].isdigit():
+            graph_name = f"g_{graph_name}"
+        return graph_name
 
     @staticmethod
     def _normalize_node_id(node_id: str) -> str:
